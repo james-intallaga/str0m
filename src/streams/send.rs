@@ -139,6 +139,9 @@ pub struct StreamTx {
     /// Entries are retained only while the matching packet remains in the RTX cache.
     nacked_sequences: BTreeSet<SeqNo>,
 
+    /// Application-controlled generation for packets eligible for retransmission.
+    retransmission_epoch: u64,
+
     /// Requested padding, that has not been turned into packets yet.
     padding: usize,
 
@@ -200,6 +203,7 @@ pub struct RtpWrite {
     marker: bool,
     ext_vals: ExtensionValues,
     nackable: bool,
+    retransmission_epoch: u64,
     payload: Arc<[u8]>,
     csrc_count: usize,
     csrc: [u32; 15],
@@ -249,6 +253,7 @@ impl RtpWrite {
             marker: false,
             ext_vals: ExtensionValues::default(),
             nackable: false,
+            retransmission_epoch: 0,
             payload: payload.into(),
             csrc_count: 0,
             csrc: [0; 15],
@@ -271,6 +276,16 @@ impl RtpWrite {
     /// Set whether this RTP packet should respond to incoming NACKs.
     pub fn nackable(mut self, nackable: bool) -> Self {
         self.nackable = nackable;
+        self
+    }
+
+    /// Associate this packet with an application-controlled retransmission epoch.
+    ///
+    /// SFUs can advance the epoch when a subscriber commits to a different
+    /// simulcast or SVC layer. Packets from older epochs may still leave the
+    /// regular send queue, but are no longer cached or retransmitted.
+    pub fn retransmission_epoch(mut self, epoch: u64) -> Self {
+        self.retransmission_epoch = epoch;
         self
     }
 
@@ -326,6 +341,7 @@ impl StreamTx {
             unpaced: None,
             resends: VecDeque::new(),
             nacked_sequences: BTreeSet::new(),
+            retransmission_epoch: 0,
             padding: 0,
             blank_packet: RtpPacket::blank(),
             rtx_cache: RtxCache::new(2000, DEFAULT_RTX_CACHE_DURATION),
@@ -408,6 +424,23 @@ impl StreamTx {
         self.rtx_ratio_cap = rtx_ratio_cap;
     }
 
+    /// Set the application-controlled retransmission epoch.
+    ///
+    /// Advancing the epoch invalidates the old retransmission cache without
+    /// dropping regularly queued media. This lets an SFU prevent stale packets
+    /// from a previously selected simulcast or SVC layer from being resent.
+    pub fn set_retransmission_epoch(&mut self, epoch: u64) {
+        if self.retransmission_epoch == epoch {
+            return;
+        }
+        self.retransmission_epoch = epoch;
+        self.stats
+            .record_suppressed_retransmissions(self.resends.len() as u64);
+        self.rtx_cache.clear();
+        self.resends.clear();
+        self.nacked_sequences.clear();
+    }
+
     /// Set whether this stream is unpaced or not.
     ///
     /// This is only relevant when BWE (Bandwidth Estimation) is enabled. By default, audio is unpaced
@@ -430,6 +463,7 @@ impl StreamTx {
             marker,
             ext_vals,
             nackable,
+            retransmission_epoch,
             payload,
             csrc_count,
             csrc,
@@ -470,6 +504,7 @@ impl StreamTx {
             payload,
             vp8_patch,
             nackable,
+            retransmission_epoch,
             // The overall idea for str0m is to only drive time forward from handle_input. If we
             // used a "now" argument to write_rtp(), we effectively get a second point that also need
             // to move time forward _for all of Rtc_ – that's too complicated.
@@ -724,7 +759,7 @@ impl StreamTx {
                 .send_queue
                 .pop(now)
                 .expect("head of send_queue to be there");
-            if pkt.nackable {
+            if pkt.nackable && pkt.retransmission_epoch == self.retransmission_epoch {
                 self.rtx_cache.cache_sent_packet(pkt, now);
             }
         }
@@ -1317,6 +1352,7 @@ mod test {
             timestamp,
             last_sender_info: None,
             nackable: true,
+            retransmission_epoch: 0,
         }
     }
 
@@ -1384,5 +1420,44 @@ mod test {
         assert_eq!(stream.stats.nack_misses, 0);
         assert_eq!(stream.stats.repeated_nacks, 1);
         assert_eq!(stream.resends.len(), 2);
+    }
+
+    #[test]
+    fn advancing_retransmission_epoch_invalidates_only_rtx_state() {
+        let now = Instant::now();
+        let mut stream = StreamTx::new(42.into(), None, MidRid(Mid::from("0"), None), true, 1200);
+        stream
+            .rtx_cache
+            .cache_sent_packet(nackable_packet(7, now), now);
+        assert!(
+            stream
+                .handle_nack([NackEntry { pid: 7, blp: 0 }].into_iter(), now)
+                .is_some()
+        );
+        assert_eq!(stream.resends.len(), 1);
+
+        stream.set_retransmission_epoch(1);
+
+        assert_eq!(stream.retransmission_epoch, 1);
+        assert!(stream.rtx_cache.last_cached_seq_no().is_none());
+        assert!(stream.resends.is_empty());
+        assert!(stream.nacked_sequences.is_empty());
+        assert_eq!(stream.stats.retransmissions_suppressed, 1);
+    }
+
+    #[test]
+    fn rtp_write_carries_retransmission_epoch() {
+        let write = RtpWrite::new(
+            Pt::new_with_value(96),
+            SeqNo::from(7_u64),
+            90_000,
+            Instant::now(),
+            [1, 2, 3],
+        )
+        .nackable(true)
+        .retransmission_epoch(9);
+
+        assert!(write.nackable);
+        assert_eq!(write.retransmission_epoch, 9);
     }
 }
