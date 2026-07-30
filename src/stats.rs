@@ -156,6 +156,22 @@ pub struct MediaEgressStats {
     pub plis: u64,
     /// Number of nacks received.
     pub nacks: u64,
+    /// Number of individual RTP sequence numbers requested by received NACKs.
+    ///
+    /// One RTCP NACK packet can request multiple sequence numbers.
+    pub nack_requests: u64,
+    /// Number of requested RTP sequence numbers found in the retransmission cache.
+    pub nack_acks: u64,
+    /// Number of requested RTP sequence numbers absent from the retransmission cache.
+    pub nack_misses: u64,
+    /// Number of requested RTP sequence numbers that had already been requested.
+    pub repeated_nacks: u64,
+    /// Number of RTP packets retransmitted in response to NACKs.
+    pub retransmitted_packets: u64,
+    /// Number of RTP payload bytes retransmitted in response to NACKs.
+    pub retransmitted_bytes: u64,
+    /// Number of queued retransmissions discarded by the retransmission ratio cap.
+    pub retransmissions_suppressed: u64,
     /// Round-trip-time extracted from the last RTCP receiver report.
     pub rtt: Option<Duration>,
     /// Fraction of packets lost averaged from the RTCP receiver reports received.

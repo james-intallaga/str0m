@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -133,6 +133,11 @@ pub struct StreamTx {
 
     /// Scheduled resends due to NACK or spurious padding.
     resends: VecDeque<Resend>,
+
+    /// Sequence numbers that have already received an actionable NACK.
+    ///
+    /// Entries are retained only while the matching packet remains in the RTX cache.
+    nacked_sequences: BTreeSet<SeqNo>,
 
     /// Requested padding, that has not been turned into packets yet.
     padding: usize,
@@ -320,6 +325,7 @@ impl StreamTx {
             queue_info: None,
             unpaced: None,
             resends: VecDeque::new(),
+            nacked_sequences: BTreeSet::new(),
             padding: 0,
             blank_packet: RtpPacket::blank(),
             rtx_cache: RtxCache::new(2000, DEFAULT_RTX_CACHE_DURATION),
@@ -773,6 +779,8 @@ impl StreamTx {
 
             // If we hit the cap, stop doing resends by clearing those we have queued.
             if ratio > ratio_cap {
+                self.stats
+                    .record_suppressed_retransmissions(self.resends.len() as u64);
                 self.resends.clear();
                 return None;
             }
@@ -953,17 +961,36 @@ impl StreamTx {
         entries: impl Iterator<Item = NackEntry>,
         now: Instant,
     ) -> Option<()> {
+        let entries = entries.collect::<Vec<_>>();
+        let requests = entries
+            .iter()
+            .map(|entry| 1_u64 + u64::from(entry.blp.count_ones()))
+            .sum::<u64>();
+
         // Turning NackEntry into SeqNo we need to know a SeqNo "close by" to lengthen the 16 bit
         // sequence number into the 64 bit we have in SeqNo.
-        let seq_no = self.rtx_cache.last_cached_seq_no()?;
-        let iter = entries.flat_map(|n| n.into_iter(seq_no));
+        let Some(seq_no) = self.rtx_cache.last_cached_seq_no() else {
+            self.stats.record_nack_requests(requests, 0, requests, 0);
+            return None;
+        };
+        let iter = entries.into_iter().flat_map(|n| n.into_iter(seq_no));
+
+        let mut acknowledgements = 0_u64;
+        let mut misses = 0_u64;
+        let mut repeats = 0_u64;
 
         // Schedule all resends. They will be handled on next poll_packet
         for seq_no in iter {
             let Some(packet) = self.rtx_cache.get_cached_packet_by_seq_no(seq_no) else {
                 // Packet was not available in RTX cache, it has probably expired.
+                misses += 1;
                 continue;
             };
+
+            acknowledgements += 1;
+            if !self.nacked_sequences.insert(seq_no) {
+                repeats += 1;
+            }
 
             let resend = Resend {
                 seq_no,
@@ -972,6 +999,11 @@ impl StreamTx {
             };
             self.resends.push_back(resend);
         }
+
+        self.stats
+            .record_nack_requests(requests, acknowledgements, misses, repeats);
+        let (cache, nacked_sequences) = (&mut self.rtx_cache, &mut self.nacked_sequences);
+        nacked_sequences.retain(|seq_no| cache.get_cached_packet_by_seq_no(*seq_no).is_some());
 
         Some(())
     }
@@ -1206,6 +1238,7 @@ impl StreamTx {
         self.queue_info = None;
         self.rtx_cache.clear();
         self.resends.clear();
+        self.nacked_sequences.clear();
         self.padding = 0;
     }
 
@@ -1270,7 +1303,22 @@ struct Resend {
 
 #[cfg(test)]
 mod test {
+    use crate::rtp_::{MediaTime, RtpHeader};
+
     use super::*;
+
+    fn nackable_packet(seq_no: u64, timestamp: Instant) -> RtpPacket {
+        RtpPacket {
+            seq_no: seq_no.into(),
+            time: MediaTime::from_90khz(0),
+            header: RtpHeader::default(),
+            payload: [1, 2, 3].into(),
+            vp8_patch: None,
+            timestamp,
+            last_sender_info: None,
+            nackable: true,
+        }
+    }
 
     #[test]
     fn queue_info_is_cached_on_queue_state_update() {
@@ -1295,5 +1343,46 @@ mod test {
 
         stream.reset_buffers();
         assert!(stream.queue_info().is_none());
+    }
+
+    #[test]
+    fn nack_without_cached_packets_is_counted_as_a_miss() {
+        let mut stream = StreamTx::new(42.into(), None, MidRid(Mid::from("0"), None), true, 1200);
+
+        assert!(
+            stream
+                .handle_nack(
+                    [NackEntry { pid: 7, blp: 0b101 }].into_iter(),
+                    Instant::now(),
+                )
+                .is_none()
+        );
+        assert_eq!(stream.stats.nack_requests, 3);
+        assert_eq!(stream.stats.nack_acks, 0);
+        assert_eq!(stream.stats.nack_misses, 3);
+        assert_eq!(stream.stats.repeated_nacks, 0);
+    }
+
+    #[test]
+    fn repeated_actionable_nack_is_counted() {
+        let now = Instant::now();
+        let mut stream = StreamTx::new(42.into(), None, MidRid(Mid::from("0"), None), true, 1200);
+        stream
+            .rtx_cache
+            .cache_sent_packet(nackable_packet(7, now), now);
+
+        let nack = NackEntry { pid: 7, blp: 0 };
+        assert!(stream.handle_nack([nack].into_iter(), now).is_some());
+        assert!(
+            stream
+                .handle_nack([nack].into_iter(), now + Duration::from_millis(10))
+                .is_some()
+        );
+
+        assert_eq!(stream.stats.nack_requests, 2);
+        assert_eq!(stream.stats.nack_acks, 2);
+        assert_eq!(stream.stats.nack_misses, 0);
+        assert_eq!(stream.stats.repeated_nacks, 1);
+        assert_eq!(stream.resends.len(), 2);
     }
 }

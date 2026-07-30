@@ -27,6 +27,16 @@ pub(crate) struct StreamTxStats {
     plis: u64,
     /// count of NACKs received
     nacks: u64,
+    /// count of individual sequence numbers requested by NACKs
+    pub(crate) nack_requests: u64,
+    /// count of requested sequence numbers available for retransmission
+    pub(crate) nack_acks: u64,
+    /// count of requested sequence numbers missing from the retransmission cache
+    pub(crate) nack_misses: u64,
+    /// count of sequence numbers requested more than once
+    pub(crate) repeated_nacks: u64,
+    /// count of queued retransmissions suppressed by the retransmission ratio cap
+    pub(crate) retransmissions_suppressed: u64,
     /// round trip time
     /// Can be null in case of missing or bad reports
     rtt: Option<Duration>,
@@ -55,6 +65,11 @@ impl StreamTxStats {
             firs: 0,
             plis: 0,
             nacks: 0,
+            nack_requests: 0,
+            nack_acks: 0,
+            nack_misses: 0,
+            repeated_nacks: 0,
+            retransmissions_suppressed: 0,
             rtt: None,
             losses: Losses::new(enable_stats),
             last_rr: None,
@@ -74,6 +89,23 @@ impl StreamTxStats {
 
     pub fn increase_nacks(&mut self) {
         self.nacks += 1;
+    }
+
+    pub fn record_nack_requests(
+        &mut self,
+        requests: u64,
+        acknowledgements: u64,
+        misses: u64,
+        repeats: u64,
+    ) {
+        self.nack_requests += requests;
+        self.nack_acks += acknowledgements;
+        self.nack_misses += misses;
+        self.repeated_nacks += repeats;
+    }
+
+    pub fn record_suppressed_retransmissions(&mut self, packets: u64) {
+        self.retransmissions_suppressed += packets;
     }
 
     pub fn increase_plis(&mut self) {
@@ -131,6 +163,13 @@ impl StreamTxStats {
                 firs: self.firs,
                 plis: self.plis,
                 nacks: self.nacks,
+                nack_requests: self.nack_requests,
+                nack_acks: self.nack_acks,
+                nack_misses: self.nack_misses,
+                repeated_nacks: self.repeated_nacks,
+                retransmitted_packets: self.packets_resent,
+                retransmitted_bytes: self.bytes_resent,
+                retransmissions_suppressed: self.retransmissions_suppressed,
                 rtt: self.rtt,
                 loss,
                 timestamp: now,
