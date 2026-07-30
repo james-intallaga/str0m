@@ -434,6 +434,7 @@ impl StreamTx {
             return;
         }
         self.retransmission_epoch = epoch;
+        self.stats.record_retransmission_epoch_change();
         self.stats
             .record_suppressed_retransmissions(self.resends.len() as u64);
         self.rtx_cache.clear();
@@ -1443,6 +1444,7 @@ mod test {
         assert!(stream.resends.is_empty());
         assert!(stream.nacked_sequences.is_empty());
         assert_eq!(stream.stats.retransmissions_suppressed, 1);
+        assert_eq!(stream.stats.retransmission_epoch_changes, 1);
     }
 
     #[test]

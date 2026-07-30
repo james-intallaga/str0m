@@ -35,8 +35,10 @@ pub(crate) struct StreamTxStats {
     pub(crate) nack_misses: u64,
     /// count of sequence numbers requested more than once
     pub(crate) repeated_nacks: u64,
-    /// count of queued retransmissions suppressed by the retransmission ratio cap
+    /// count of queued retransmissions suppressed by policy
     pub(crate) retransmissions_suppressed: u64,
+    /// count of application-controlled retransmission epoch changes
+    pub(crate) retransmission_epoch_changes: u64,
     /// round trip time
     /// Can be null in case of missing or bad reports
     rtt: Option<Duration>,
@@ -70,6 +72,7 @@ impl StreamTxStats {
             nack_misses: 0,
             repeated_nacks: 0,
             retransmissions_suppressed: 0,
+            retransmission_epoch_changes: 0,
             rtt: None,
             losses: Losses::new(enable_stats),
             last_rr: None,
@@ -106,6 +109,10 @@ impl StreamTxStats {
 
     pub fn record_suppressed_retransmissions(&mut self, packets: u64) {
         self.retransmissions_suppressed += packets;
+    }
+
+    pub fn record_retransmission_epoch_change(&mut self) {
+        self.retransmission_epoch_changes += 1;
     }
 
     pub fn increase_plis(&mut self) {
@@ -170,6 +177,7 @@ impl StreamTxStats {
                 retransmitted_packets: self.packets_resent,
                 retransmitted_bytes: self.bytes_resent,
                 retransmissions_suppressed: self.retransmissions_suppressed,
+                retransmission_epoch_changes: self.retransmission_epoch_changes,
                 rtt: self.rtt,
                 loss,
                 timestamp: now,

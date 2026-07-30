@@ -170,8 +170,10 @@ pub struct MediaEgressStats {
     pub retransmitted_packets: u64,
     /// Number of RTP payload bytes retransmitted in response to NACKs.
     pub retransmitted_bytes: u64,
-    /// Number of queued retransmissions discarded by the retransmission ratio cap.
+    /// Number of queued retransmissions discarded by retransmission policy.
     pub retransmissions_suppressed: u64,
+    /// Number of application-controlled retransmission epoch changes.
+    pub retransmission_epoch_changes: u64,
     /// Round-trip-time extracted from the last RTCP receiver report.
     pub rtt: Option<Duration>,
     /// Fraction of packets lost averaged from the RTCP receiver reports received.
